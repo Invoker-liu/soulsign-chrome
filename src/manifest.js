@@ -1,9 +1,8 @@
-module.exports = {
+const manifest = {
 	name: "魂签",
-	version: "2.4.3",
 	description: "自动签到",
 	author: "inu1255",
-
+	homepage_url: "https://github.com/inu1255/soulsign-chrome",
 	manifest_version: 2,
 	icons: {
 		16: "icons/16.png",
@@ -65,3 +64,11 @@ module.exports = {
 	// 	},
 	// ],
 };
+
+if (manifest.manifest_version == 2) {
+	delete manifest.host_permissions;
+	let permissions_v3 = new Set(["offscreen"]);
+	manifest.permissions = manifest.permissions.filter((x) => !permissions_v3.has(x));
+}
+
+module.exports = manifest;

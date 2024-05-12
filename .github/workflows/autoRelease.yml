@@ -60,7 +60,7 @@ jobs:
         id: setup
         run: |
           npm install
-          npm run build-update
+          npm run build
 
       - name: Get manifest version
         if: steps.setup.outcome == 'success'
@@ -69,7 +69,7 @@ jobs:
         with:
           result-encoding: string
           script: |
-            const manifest = require(`${process.env.GITHUB_WORKSPACE}/build/manifest.json`);
+            const manifest = require(`${process.env.GITHUB_WORKSPACE}/dist/manifest.json`);
             return manifest.version;
 
       - name: Compare version again
@@ -124,44 +124,7 @@ jobs:
         uses: peaceiris/actions-gh-pages@v3.6.4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./build
+          publish_dir: ./dist
           user_name: 'github-actions[bot]'
           user_email: 'github-actions[bot]@users.noreply.github.com'
           full_commit_message: Release v${{ steps.get-manifest-version.outputs.result }}
-
-      - name: Git current repository name
-        id: info
-        uses: actions/github-script@v3.0.0
-        with:
-          github-token: ${{secrets.GITHUB_TOKEN}}
-          result-encoding: string
-          script: |
-            return context.repo.repo;
-
-      - name: Cache src repos
-        uses: actions/cache@v2.1.1
-        id: cache
-        with:
-          path: ${{ github.workspace }}/hub-mirror-cache
-          key: ${{ runner.os }}-${{ github.repository_owner }}-${{ steps.info.outputs.result }}-cache
-
-      - name: Print the cache status
-        if: steps.cache.outputs.cache-hit == 'true'
-        run: |
-          echo "Cached successfully."
-
-      - name: Mirror the Github repos to Gitee with cache
-        uses: Yikun/hub-mirror-action@v0.09
-        with:
-          src: github/inu1255
-          dst: gitee/inu1255
-          dst_key: ${{ secrets.GITEE_PRIVATE_KEY }}
-          dst_token: ${{ secrets.GITEE_TOKEN }}
-          account_type: user
-          cache_path: /github/workspace/hub-mirror-cache
-          static_list: ${{ steps.info.outputs.result }}
-          force_update: true
-
-      - name: Print cache path
-        run: |
-          ls -la ${{ github.workspace }}/hub-mirror-cache

@@ -1,9 +1,17 @@
 import Vue from "vue";
+
+Vue.prototype.$icon = (url) => {
+	if (/Chrome\//.test(navigator.userAgent)) {
+		return `chrome://favicon/${url}`;
+	}
+	return `https://www.google.com/s2/favicons?domain=${url}`;
+};
+
 /**
  * @param {string} [name]
  * @param {Function} fn
  */
-function loading(name, fn) {
+Vue.prototype.$with = function (name, fn) {
 	if (arguments.length < 2) {
 		fn = name;
 		name = "loading";
@@ -21,6 +29,4 @@ function loading(name, fn) {
 			return Promise.reject(err);
 		}
 	);
-}
-
-Vue.prototype.$with = loading;
+};

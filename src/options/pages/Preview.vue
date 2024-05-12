@@ -1,6 +1,7 @@
 <template>
 	<mu-dialog
 		v-loading="loading"
+		:overlay-close="false"
 		title="添加/更新脚本?"
 		:width="360"
 		:open="Boolean(open)"
@@ -25,7 +26,7 @@
 				</div>
 			</li>
 			<li><span class="key">版本：</span>{{ task.version }}</li>
-			<li><span class="key">在线检查频率：</span>{{ task.expire || 900e3 | diff }}</li>
+			<li><span class="key">在线检查频率：</span>{{ diff(task.expire || 900e3) }}</li>
 			<li>
 				<span v-if="task.grants && task.grants.length" class="key">权限：</span>
 				<div style="color: red">
@@ -44,8 +45,9 @@
 	</mu-dialog>
 </template>
 <script>
-import utils from "../../common/client";
+import {compileTask, diff} from "@/backend/utils";
 import grants from "../../common/grants";
+import axios from "@/common/axios";
 
 export default {
 	props: {
@@ -71,8 +73,8 @@ export default {
 			if (!this.open) return;
 			this.$with(async () => {
 				try {
-					let {data} = await utils.axios.get(this.open);
-					this.task = utils.compileTask(data);
+					let {data} = await axios.get(this.open);
+					this.task = compileTask(data);
 				} catch (error) {
 					this.$toast.error(error + "");
 					this.close();
@@ -82,6 +84,9 @@ export default {
 		close() {
 			location.href = "#";
 			this.$emit("update:open", false);
+		},
+		diff(v) {
+			return diff(v);
 		},
 	},
 };

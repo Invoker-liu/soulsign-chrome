@@ -1,8 +1,9 @@
 import config from "../backend/config";
-import utils from "../backend/utils";
 import backapi from "../backend/backapi";
-import dayjs from "dayjs";
-import {newNotification} from "@/common/chrome";
+import {isFirefox, localGet, localSave, newNotification, syncGet, syncSave} from "@/common/chrome";
+import {isEmpty, sleep} from "@/common/utils";
+import {addTask, compileTask, getTasks, runTask, setTask} from "@/backend/utils";
+import compareVersions from "compare-versions";
 
 chrome.runtime.onMessage.addListener(function (info, sender, cb) {
 	(async () => {
@@ -24,36 +25,28 @@ const TAIL_KEYWORD = "#soulsign-install";
 chrome.tabs.onUpdated.addListener(function (tabId, tabInfo, tab) {
 	if (tabInfo.url && tabInfo.url.endsWith(TAIL_KEYWORD)) {
 		chrome.tabs.update(tabId, {
-			url: chrome.runtime.getURL(
-				"/pages/options.html#" + tabInfo.url.slice(0, -TAIL_KEYWORD.length)
-			),
+			url: chrome.runtime.getURL("/options.html#" + tabInfo.url.slice(0, -TAIL_KEYWORD.length)),
 		});
-	}
-	if (!config.donate) return;
-	let url =
-		"https://union-click.jd.com/jdc?e=&p=AyIGZRprFDJWWA1FBCVbV0IUWVALHFRBEwQAQB1AWQkrGn0HSFEFTit2UVZMFnwsQQsQWgtlOxkOIgdTGloXCxcGUxhrFQMTB1cZWxEGEDdlG1olSXwGZRhaFQEbDlIbWxEyEgNcGF0SChcOVhNcFTIVB1wrGUlAFwVUGVMUCiI3ZRhrJTISB2Uba0pGT1plGVoUBhs%3D";
-	if (tabInfo.url && tabInfo.url.endsWith("//www.jd.com/")) {
-		chrome.tabs.update(tabId, {url});
 	}
 });
 
 function race(pms, ms) {
-	return Promise.race([utils.sleep(ms || config.timeout * 1e3), pms]);
+	return Promise.race([sleep(ms || config.timeout * 1e3), pms]);
 }
 
 function init() {
 	return new Promise(function (resolve, reject) {
-		chrome.storage.sync.get("config", function (data) {
-			if (!data || !data.config) {
+		syncGet("config").then((data) => {
+			if (!data) {
 				// 旧版本或者新安装，尝试升级
-				chrome.storage.local.get(Object.keys(config), function (data) {
-					if (Object.keys(data).length) {
+				localGet(Object.keys(config)).then((data) => {
+					if (!isEmpty(data)) {
 						// 旧版本
 						console.log("旧版本升级");
 						Object.assign(config, data);
-						chrome.storage.local.get("tasks", function ({tasks}) {
+						localGet("tasks").then((tasks) => {
 							chrome.storage.local.clear(function () {
-								chrome.storage.sync.set({config});
+								syncSave({config});
 								let sync = {tasks: []};
 								let local = {};
 								for (let task of tasks) {
@@ -61,8 +54,7 @@ function init() {
 									sync.tasks.push(name);
 									local[name] = task;
 								}
-								newNotification("升级成功");
-								resolve(Promise.all([utils.localSave(local), utils.syncSave(sync)]));
+								resolve(Promise.all([localSave(local), syncSave(sync)]));
 							});
 						});
 					} else {
@@ -72,7 +64,7 @@ function init() {
 					}
 				});
 			} else {
-				Object.assign(config, data.config);
+				Object.assign(config, data);
 				resolve();
 			}
 		});
@@ -80,8 +72,8 @@ function init() {
 }
 
 async function loop() {
-	let tasks = await utils.getTasks();
-	let today = dayjs().add(-config.begin_at, "second").startOf("day").add(config.begin_at, "second");
+	let tasks = await getTasks();
+	let today = new Date(Date.now() - config.begin_at).setHours(0, 0, 0, 0) + config.begin_at;
 	let err_cnt = 0;
 	for (let task of tasks) {
 		if (!task.enable) continue;
@@ -96,7 +88,7 @@ async function loop() {
 				try {
 					ok = await race(task.check(task._params));
 				} catch (err) {
-					if (/Network Error|timeout/.test(err)) return; // 网络中断载时
+					// if (/Network Error|timeout/.test(err)) return; // 网络中断时
 					task.result = err + "";
 					console.error(task.name, "开始检查是否在线失败", err);
 				}
@@ -104,33 +96,43 @@ async function loop() {
 					// 不在线，直接跳过
 					err_cnt++;
 					if (config.notify_at + config.notify_freq * 1e3 < now) {
-						// 距离上次不在线15分钟了
+						// 距离上次通知很久了
 						newNotification(`${task.name}不在线`, {
 							body: "点此去登录或禁用它",
-							icon: `chrome://favicon/https://${task.domains[0]}`,
-						}).onclick = function () {
-							chrome.tabs.create({url: task.loginURL || "/pages/options.html"});
-						};
+							url: task.loginURL || "/options.html",
+						});
 						config.notify_at = now;
-						await utils.syncSave({config});
+						await syncSave({config});
 					}
 					task.online_at = -now;
-					await utils.setTask(task);
+					await setTask(task);
 					continue;
 				}
 				task.online_at = now;
 			}
 		}
-		if (dayjs(task.success_at).isBefore(today)) {
-			// 今天没有执行成功过
+		if (task.freq ? task.success_at + task.freq < Date.now() : task.success_at < today) {
+			// 到达运行频率 | 今天没有执行成功过
 			if (task.failure_at + config.retry_freq * 1e3 <= new Date().getTime()) {
 				// 运行失败后要歇10分钟
 				changed = true;
-				await race(utils.runTask(task));
+				await race(runTask(task));
 			}
 		}
-		if (task.failure_at > task.success_at) err_cnt++;
-		if (changed) await utils.setTask(task);
+		if (task.failure_at > task.success_at) {
+			err_cnt++;
+			let now = Date.now();
+			if (config.notify_at + config.notify_freq * 1e3 < now) {
+				// 距离上次通知很久了
+				newNotification(`${task.name}`, {
+					body: "签到失败",
+					url: "/options.html",
+				});
+				config.notify_at = now;
+				await syncSave({config});
+			}
+		}
+		if (changed) await setTask(task);
 	}
 	if (err_cnt) {
 		chrome.browserAction.setBadgeBackgroundColor({color: "#F44336"});
@@ -144,17 +146,16 @@ async function upgrade() {
 	let now = Date.now();
 	if (config.upgrade_at + config.upgrade_freq * 1e3 > now) return;
 	console.log("开始检查更新");
-	newNotification("开始检查并更新脚本");
-	let tasks = await utils.getTasks();
+	let tasks = await getTasks();
 	let li = [];
 	for (let task of tasks) {
 		if (!task.enable) continue;
 		if (task.updateURL) {
 			try {
-				let {data} = await utils.axios.get(task.updateURL);
-				let item = utils.compileTask(data);
+				let {data} = await axios.get(task.updateURL);
+				let item = compileTask(data);
 				// TODO: 脚本增加 @minSDK 标记，以便插件版本低时不更新脚本
-				if (utils.compareVersions(item.version, task.version) > 0) {
+				if (compareVersions(item.version, task.version) > 0) {
 					let changed = false;
 					for (let k of ["author", "name", "grants", "domains"]) {
 						if (item[k] != task[k]) {
@@ -162,10 +163,10 @@ async function upgrade() {
 							break;
 						}
 					}
-					if (changed) chrome.tabs.create({url: "/pages/options.html#" + task.updateURL});
+					if (changed) chrome.tabs.create({url: "/options.html#" + task.updateURL});
 					else {
 						li.push(task.name);
-						utils.addTask(tasks, item);
+						addTask(tasks, item);
 					}
 				}
 			} catch (error) {
@@ -176,11 +177,10 @@ async function upgrade() {
 	if (li.length) {
 		let title = li[0];
 		if (li.length > 1) title += `等${li.length}个脚本`;
-		newNotification(title + " 升级成功").onclick = () =>
-			chrome.tabs.create({url: "/pages/options.html"});
+		newNotification(title + " 升级成功", {url: "/options.html"});
 	}
 	config.upgrade_at = now;
-	await utils.syncSave({config});
+	await syncSave({config});
 }
 
 let originMap = {};
@@ -199,27 +199,22 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
 		// 只有插件才加
 		var initiaor = details.initiator || details.documentUrl;
 		if (!initiaor || !/^\w+-extension:/.test(initiaor)) return;
-		var edit = false;
-		for (var i = 0; i < requestHeaders.length; ++i) {
-			var header = requestHeaders[i];
-			if (header.name === "_referer") {
-				edit = true;
-				for (let j = 0; j < requestHeaders.length; j++) {
-					if (/^(Referer|_referer)$/.test(requestHeaders[j].name)) requestHeaders.splice(j--, 1);
-				}
-				requestHeaders.unshift({name: "Referer", value: header.value});
-			} else if (header.name === "_origin") {
-				edit = true;
-				for (let j = 0; j < requestHeaders.length; j++) {
-					if (/^(Origin|_origin)$/.test(requestHeaders[j].name)) requestHeaders.splice(j--, 1);
-				}
-				requestHeaders.unshift({name: "Origin", value: header.value});
-			}
-		}
-		if (edit) return {requestHeaders};
+		let n = 0;
+		requestHeaders = requestHeaders
+			.filter((x) => {
+				return !/^(Referer|Origin|User-Agent)$/i.test(x.name);
+			})
+			.map((x) => {
+				if (x.name == "_referer") return {name: "Referer", value: x.value};
+				if (x.name == "_origin") return {name: "Origin", value: x.value};
+				if (x.name == "_user_agent") return {name: "User-Agent", value: x.value};
+				n++;
+				return x;
+			});
+		if (n < requestHeaders.length) return {requestHeaders};
 	},
 	{urls: ["<all_urls>"], types: ["xmlhttprequest"]},
-	utils.isFirefox ? ["blocking", "requestHeaders"] : ["blocking", "requestHeaders", "extraHeaders"]
+	isFirefox ? ["blocking", "requestHeaders"] : ["blocking", "requestHeaders", "extraHeaders"]
 );
 
 chrome.webRequest.onHeadersReceived.addListener(
@@ -257,10 +252,16 @@ async function main() {
 		} catch (error) {
 			console.error(error);
 		}
-		await utils.sleep(config.loop_freq * 1e3);
+		await sleep(config.loop_freq * 1e3);
 	}
 }
 
 main().catch((err) => {
 	console.log(`崩溃`, err);
 });
+
+if ("serviceWorker" in navigator) {
+	navigator.serviceWorker.getRegistrations().then((registrations) => {
+		registrations.forEach((sw) => sw.unregister());
+	});
+}
